@@ -1,0 +1,434 @@
+theory AuthProtocolNoComments
+
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption, hashing, diffie-hellman
+
+functions:
+  H/1, H2/2, H3/3,
+  PUF/1,
+  EC/2,
+  ZK/3,
+  XZK/1
+
+
+// ‑‑‑‑‑ Commitment of the long‑term identity ‑‑‑‑‑
+//   commitment  C = H2(ID_j).  The verifier will later use
+//   !Commit(ID_j,C) to link the commitment to the real identity.
+rule P_ID: // Prover_ID_Commit
+  [ Fr(ID_j), Fr(nC) ]
+  --[ IDCommit(ID_j, nC) ]->
+  [ Out(<H2(ID_j, nC)>),
+    !Commit(ID_j, H(ID_j))
+  ]
+
+  // Initiate the authentication by Prover sending a HELLO message
+rule Prover_Hello:
+  [ Fr(CHlen), Fr(x_p), Fr(sid), !Commit(ID_j, HID) ]
+  --[ Prover_Hello(ID_j,x_p,sid) ]->
+  [ Out(<sid, HID, CHlen, x_p>),
+    !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid),
+    !A1(ID_j, x_p, sid)
+  ]
+
+rule Verifier_Hello:
+  [ In(<sid, H(ID_j), CHlen, x_p>), 
+    !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid), 
+    Fr(c), 
+    Fr(r), 
+    Fr(e) 
+  ]
+  --[ Verifier_Hello(ID_j,CHlen, x_p, sid) ]->
+  [ Out(<sid, c, e>), 
+    !A_Verifier_Chain_Hello(c, r, e, sid),
+    !A2(ID_j, CHlen, x_p, sid)
+  ]
+// ---------------------------------------------------------------
+
+
+// Start the Chain authentication procedure
+rule Pr_Chain_1:
+  let
+    rX   = EC(PUF(c), e)
+    x_pv = H2(x_p, ID_j)
+    CHA = H3(rX, c, x_pv)
+  in
+    [ In(<sid, c, e>),
+      !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid), 
+      !A_Verifier_Chain_Hello(c, r, e, sid) ]
+    --[ Pr_Chain_1(ID_j, x_pv, rX, sid) ]->
+    [ Out(<sid, CHA, H(ID_j)>),
+      !A_Prover_InChain_Auth(ID_j, CHA, x_p, x_pv, rX, sid),
+      !A3(ID_j, x_pv, rX, sid)
+    ]
+
+rule Ver_Chain_1:
+  [ In(<sid, CHA, H(ID_j)>), 
+    !A_Verifier_Chain_Hello(c, r, e, sid), 
+    !A_Prover_InChain_Auth(ID_j, CHA, x_p, x_pv, rX, sid),
+    Fr(c1), 
+    Fr(r1), 
+    Fr(e1) 
+  ]
+  --[ Ver_Chain_1(ID_j, CHA, sid) ]->
+  [ Out(<sid, e1>), 
+    !CommonCRP(sid, c1, r1, e1),
+    !A_Verifier_InChain_Auth(ID_j, x_p, x_pv, c1, r1, e1, sid),
+    !A4(c1, e1, sid)
+  ]
+
+rule Pr_Chain_2:
+  let
+      rX1   = EC(PUF(c1), e1)
+      x_pv = H2(x_p, ID_j)
+      CHA1 = H3(rX1, c1, x_pv)
+  in
+  [ In(<sid, e1>), 
+    !CommonCRP(sid, c1, r1, e1),
+    !A_Verifier_InChain_Auth(ID_j, x_p, x_pv, c1, r1, e1, sid),
+    !A4(c1, e1, sid)
+  ]
+  --[ Pr_Chain_2(ID_j, x_pv, rX1, sid) ]->
+  [ Out(<sid, CHA1, H(ID_j)>),
+    !A_Prover_InChain_Auth_Last(ID_j, CHA1, x_p, x_pv, rX1, sid),
+    !A5(ID_j, CHA1, sid)
+  ]
+
+rule Ver_Chain_2:
+  [ In(<sid, CHA1, H(ID_j)>), Fr(M), 
+    !A_Prover_InChain_Auth_Last(ID_j, CHA1, x_p, x_pv, rX1, sid), 
+    !A5(ID_j, CHA1, sid),
+    Fr(c2), 
+    Fr(r2), 
+    Fr(e2) 
+  ]
+  --[ Ver_Chain_2(ID_j, M, sid) ]->
+  [ Out(<sid, e2, M>), 
+    !A_Verifier_InChain_Auth_Last(c2, r2, e2, sid),
+    !A6(ID_j, M, sid)
+  ]
+// ---------------------------------------------------------------
+
+// begin the mutual auth and key exchange
+rule Mutual_Begin:
+  let
+      rx   = EC(PUF(c2), e2)
+      x_pv = H2(x_p, ID_j)
+      CHA = H3(rx, c2, x_pv)
+      Z    = ZK(M, rx, x)
+  in
+  [ In(<sid, e2, M>), 
+    !A_Verifier_InChain_Auth_Last(c2, r2, e2, sid),
+    Fr(x),
+    !A1(ID_j, x_p, sid)
+  ]
+  --[ Mutual_Begin(ID_j, x, sid) ]->
+  [ Out(<sid, CHA, Z, H(ID_j)>), !ZKA(sid, x, Z, H(ID_j)),
+    !A7(ID_j, x, sid)
+  ]
+
+rule Mutual_InProcess:
+  let
+      MTL = H2(x, ID_j)
+  in
+  [ In(<sid, CHA, Z, H(ID_j)>), !ZKA(sid, x, Z, H(ID_j)), !A7(ID_j, x, sid) ]
+  --[ Mutual_InProcess(ID_j, Z, sid) ]->
+  [ Out(<sid, MTL>), !SentMTLFull(sid, x, ID_j, Z),
+    !A8(ID_j, Z, sid)
+  ]
+
+rule Mutual_End:
+  [ In(<sid, MTL>), !SentMTLFull(sid, x, ID_j, Z) ]
+  --[ Mutual_End(ID_j, MTL, sid) ]->
+  [ !A9(ID_j, MTL, sid) ]
+
+// ---------------------------------------------------------------
+
+/*
+  Lemmas to test the backward secrecy. This lemma should be comment if want to validate other lemma except the backward secrecy
+*/
+
+/*
+rule SessionLeak:
+  [ Fr(x) ]  
+  --[ SessionLeak(x) ]->
+  [ Out(x) ]           // gives the attacker K(x)
+*/
+
+
+/*
+This rule only activate when want to validate Forward Secrecy lemma. This lemma should be comment if want to validate other lemma except the backward secrecy
+*/
+
+/*
+rule IDLeak:
+//  [ !RegID($P, ID_j) ]
+  [!Commit(ID_j, H(ID_j))]
+  --[IDLeak(ID_j)]->
+  [ Out(ID_j) ]
+*/
+
+// ****************************************************************************************************************************************************************************************
+
+// **************************************************End of Rules**************************************************************************************************************************
+
+// ****************************************************************************************************************************************************************************************
+
+/*
+    Group #1 Correctness / Key Establishment. This evaluation splitted into two lemmas for computational reason. Each lemma proves the protocol can progress through a particular (or the full) sequence of steps, i.e., that a full run is reachable and a key can in principle be established.
+*/
+
+lemma Correctness_Hello:
+  exists-trace 
+  "
+  Ex ID_j x_p CHlen sid #t1 #t2.
+    Prover_Hello(ID_j, x_p, sid) @ t1
+    & Verifier_Hello(ID_j, CHlen, x_p, sid) @ t2
+    & #t1 < #t2
+  "
+
+lemma Correctness_Hello_to_InChain:
+  exists-trace 
+  "
+  Ex ID_j x_p x_pv rX CHlen sid #t1 #t2.
+    Verifier_Hello(ID_j, CHlen, x_p, sid) @ t1
+    &  Pr_Chain_1(ID_j, x_pv, rX, sid) @ t2
+    & #t1 < #t2
+  "
+  
+lemma Correctness_InChain:
+  exists-trace 
+  "
+  Ex ID_j x_pv rX rX1 M CHA sid #t1 #t2 #t3 #t4.
+    Pr_Chain_1(ID_j, x_pv, rX, sid) @ t1
+    & Ver_Chain_1(ID_j, CHA, sid) @ t2
+    & Pr_Chain_2(ID_j, x_pv, rX1, sid) @ t3
+    & Ver_Chain_2(ID_j, M, sid) @ t4
+    & #t1 < #t2
+    & #t2 < #t3
+    & #t3 < #t4
+  "
+
+lemma Correctness_Mutual:
+  exists-trace 
+  "
+  Ex ID_j x Z MTL sid #t1 #t2 #t3.
+    Mutual_Begin(ID_j, x, sid) @ t1
+    & Mutual_InProcess(ID_j, Z, sid) @ t2
+    & Mutual_End(ID_j, MTL, sid) @ t3
+    & #t1 < #t2
+    & #t2 < #t3
+  "
+
+lemma CorrectnessAll:
+  exists-trace 
+  "
+  Ex ID_j x_p x_pv rX rX1 CHlen CHA x Z MTL M sid #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #t9.
+    Prover_Hello(ID_j, x_p, sid) @ t1
+    & Verifier_Hello(ID_j, CHlen, x_p, sid) @ t2
+    & Pr_Chain_1(ID_j, x_pv, rX, sid) @ t3
+    & Ver_Chain_1(ID_j, CHA, sid) @ t4
+    & Pr_Chain_2(ID_j, x_pv, rX1, sid) @ t5
+    & Ver_Chain_2(ID_j, M, sid) @ t6
+    & Mutual_Begin(ID_j, x, sid) @ t7
+    & Mutual_InProcess(ID_j, Z, sid) @ t8
+    & Mutual_End(ID_j, MTL, sid) @ t9
+    & #t1 < #t2
+    & #t2 < #t3
+    & #t3 < #t4
+    & #t4 < #t5
+    & #t5 < #t6
+    & #t6 < #t7
+    & #t7 < #t8
+    & #t8 < #t9
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+
+/*
+  Group #2 Mutual authentication (+ replay / impersonation). All these express that the prover and verifier agree on each otherâ€™s participation and prevent classic replay or impersonation variations.
+*/
+lemma Mutual_Auth:
+  "
+  All ID_j Z sid #t1.
+    Mutual_InProcess(ID_j, Z, sid) @ t1
+    ==> (Ex x #t2. Mutual_Begin(ID_j, x, sid) @ t2 & #t2 < #t1)
+  "
+
+lemma Mutual_Auth_2:
+  "
+  All ID_j MTL sid #t1.
+    Mutual_End(ID_j, MTL, sid) @ t1
+    ==> (Ex Z #t2. Mutual_InProcess(ID_j, Z, sid) @ t2 & #t2 < #t1) 
+  " 
+
+lemma No_Imper:
+  "
+  All ID_j Z sid #t1.
+    Mutual_InProcess(ID_j, Z, sid) @ t1
+    ==> (Ex ID_j x #t2. Mutual_Begin(ID_j, x, sid) @ t2 & #t2 < #t1)
+  "
+
+lemma No_Imper_2:
+  "
+  All ID_j MTL sid #t1.
+    Mutual_End(ID_j, MTL, sid) @ t1
+    ==> (Ex Z #t2. Mutual_InProcess(ID_j, Z, sid) @ t2 & #t2 < #t1) 
+  "
+
+lemma Possible_Impersonation_Attack:  // should be return false
+  exists-trace
+  "
+  Ex ID_j Z sid #t1.
+    Mutual_InProcess(ID_j, Z, sid) @ t1
+    & not (Ex x #t2. Mutual_Begin(ID_j, x, sid) @ t2 & #t2 < #t1)
+  "
+
+lemma No_Reuse:
+  "
+  All ID_j M sid #t1 #t2.
+    Ver_Chain_2(ID_j, M, sid) @ t1
+    & Ver_Chain_2(ID_j, M, sid) @ t2
+    ==> #t1 = #t2
+  "
+
+lemma Replay_Attack:
+  "
+  All ID_j M sid #t1 #t2.
+    Ver_Chain_2(ID_j, M, sid) @ t1
+    & Ver_Chain_2(ID_j, M, sid) @ t2
+    ==> #t1 = #t2
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+/*
+  Group #3 Confidentiality of session & long-term secrets. Each lemma says some secret (session key x, identity ID_j, derived values x_pv, rX) is never deducible by the attacker.
+
+*/
+
+lemma No_Sniff_X:
+  "
+  All ID_j x Z MTL sid #t1 #t2 #t3.
+    Mutual_Begin(ID_j, x, sid) @ t1
+    & Mutual_InProcess(ID_j, Z, sid) @ t2
+    & Mutual_End(ID_j, MTL, sid) @ t3
+    ==> not (Ex #t4. K(x) @t4)
+  "
+lemma Session_Secrecy:
+  "
+  All ID_j x sid #t1.
+    Mutual_Begin(ID_j, x, sid) @ t1
+    ==> not (Ex #t2. K(x) @ t2)
+  "
+
+lemma Stolen_Ver:
+  "
+  All ID_j x sid #t1.
+    Mutual_Begin(ID_j, x, sid) @ t1
+    ==> not (Ex #t2. K(x) @ t2)
+  "  
+
+lemma No_Sniff_IDj:
+  "
+  All ID_j x_p sid #t1.
+    Prover_Hello(ID_j, x_p, sid) @ t1
+    ==> not (Ex #t2. K(ID_j) @t2)
+  "
+
+lemma No_Sniff_xpv_r:
+  "
+  All ID_j x_pv rX CHA sid #t1 #t2.
+    Pr_Chain_1(ID_j, x_pv, rX, sid) @ t1
+    & Ver_Chain_1(ID_j, CHA, sid) @ t2
+    ==> not (Ex #t3. K(x_pv) @t3 & K(rX) @t3)
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+/*
+  Group #4 Perfect forward / backward secrecy. This lemma will be invalid or cannot be executed if the IDLeak and SessionLeak rules are not executed.
+*/
+
+lemma Forward_Secrecy:
+  "
+  All ID_j x sid #t1 #t2.
+    Mutual_Begin(ID_j, x, sid) @ t1
+    & IDLeak(ID_j) @ t2
+    & #t1 < #t2
+    ==> not (Ex #t3. K(x) @ t3)
+  "
+
+
+lemma Backward_Secrecy:
+  "
+  All x_old  ID_new x_new sid_new  #t_leak #t_new.
+     SessionLeak(x_old)                      @t_leak
+   & Mutual_Begin(ID_new, x_new, sid_new) @t_new
+   & #t_leak < #t_new                     // leak happens first
+   ==> not (Ex #t. K(x_new) @ #t)         // attacker never learns new key
+  "  
+
+// ****************************************************************************************************************************************************************************************
+
+
+/*
+  Group #6 Insider / MITM resistance
+*/
+
+lemma MITM_Resistance:
+  "
+  All ID1 ID2 Z x sid #t_ver #t_prov.
+      Mutual_InProcess(ID1, Z,  sid) @ #t_ver
+   &  Mutual_Begin   (ID2,  x,  sid) @ #t_prov
+   ==> ID1 = ID2                     // session-binding forces same identity
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+/*
+ Group #7 Privacy: anonymity / unlinkability. Together they state that observing one or two protocol runs does not reveal or link the proverâ€™s identity.
+
+*/
+
+lemma Unlinkability:
+  "
+  All ID1 ID2 Z1 Z2 sid1 sid2 #t1 #t2.
+    Mutual_InProcess(ID1, Z1, sid1) @ t1
+    & Mutual_InProcess(ID2, Z2, sid2) @ t2
+    ==> (not (Ex #t3. K(ID1) @ t3)) & (not (Ex #t4. K(ID2) @ t4))
+  "
+
+lemma UnLink_Z_ID:
+  "
+  All ID_j Z sid #t1.
+    Mutual_InProcess(ID_j, Z, sid) @ t1
+    ==> not (Ex #t2. K(ID_j) @ t2)
+  "
+
+lemma ID_indisting:
+  "
+  All ID1 ID2 x_pv1 x_pv2 rX1 rX2 sid1 sid2 #t1 #t2.
+    Pr_Chain_1(ID1, x_pv1, rX1, sid1) @ t1
+    & Pr_Chain_1(ID2, x_pv2, rX2, sid2) @ t2
+    ==> (not (Ex #t3. K(ID1) @ t3)) & (not (Ex #t4. K(ID2) @ t4))
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+/*
+  Group #8 Non-repudiation. Ensures the verifierâ€™s evidence implies the prover really ran earlier.
+*/
+
+lemma Non_Repudiation:
+  "
+  All ID_j Z sid #t1.
+    Mutual_InProcess(ID_j, Z, sid) @ t1
+    ==> (Ex x #t2. Mutual_Begin(ID_j, x, sid) @ t2 & #t2 < #t1)
+  "
+
+// ****************************************************************************************************************************************************************************************
+
+
+end
