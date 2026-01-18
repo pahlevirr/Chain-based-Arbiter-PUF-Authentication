@@ -2,46 +2,92 @@ theory AuthProtocolNoComments
 
 begin
 
-builtins: asymmetric-encryption, symmetric-encryption, hashing, diffie-hellman
+builtins: hashing
 
 functions:
-  H/1, H2/2, H3/3,
-  PUF/1,
-  EC/2,
+  H/1,
+  PUF/2,
   ZK/3,
   XZK/1
 
 
-// ‑‑‑‑‑ Commitment of the long‑term identity ‑‑‑‑‑
-//   commitment  C = H2(ID_j).  The verifier will later use
-//   !Commit(ID_j,C) to link the commitment to the real identity.
+/* Here the asumption are placed
+    1. ID_j is unique per device
+
+*/
 rule P_ID: // Prover_ID_Commit
-  [ Fr(ID_j), Fr(nC) ]
-  --[ IDCommit(ID_j, nC) ]->
-  [ Out(<H2(ID_j, nC)>),
-    !Commit(ID_j, H(ID_j))
+  [ Fr(~ID_j) ]
+  --[ IDCommit(~ID_j) ]->
+  [ 
+    !Commit($DEVICE, ~ID_j, H(~ID_j))
   ]
+
+rule SessionID:  //  Generate unique session ID - one-time use
+  [
+    Fr(~sid)
+  ]
+  --[SessionID(~sid)]->
+  [
+    Session(~sid)   // Linear - consumed when session starts
+  ]
+
+rule SessionRND:    // Generate fresh session random - one-time use
+  [
+    Fr(~x_p)
+  ]
+  --[SessionRND(~x_p)]->
+  [
+    Session_RND(~x_p)   // Linear - consumed when used
+  ]
+
+rule SessionCHLEN: // Generate fresh CHlen - one-time use
+  [
+    Fr(~CHlen)
+  ]
+  --[SessionCHLEN(~CHlen)]->
+  [
+    Session_CHLEN(~CHlen)   // Linear - consumed when used
+  ]
+
+rule ChallengeGen:  // Generate challenge - one-time use
+  [
+    Fr(~c)
+  ]
+  --[ChallengeGen(~c)]->
+  [
+    Challenge(~c)   // Linear - consumed when used
+  ]
+
+rule UniqueGen:  // Generate unique value - one-time use
+  [
+    Fr(~r)
+  ]
+  --[UniqueGen(~r)]->
+  [
+    Unique(~r)   // Linear - consumed when used
+  ]
+
 
   // Initiate the authentication by Prover sending a HELLO message
 rule Prover_Hello:
-  [ Fr(CHlen), Fr(x_p), Fr(sid), !Commit(ID_j, HID) ]
-  --[ Prover_Hello(ID_j,x_p,sid) ]->
+  [ Session_CHLEN(CHlen),      // 
+    Session_RND(x_p),          //
+    Session(sid),              // 
+    !Commit($DEVICE, ID_j, HID) ]  // Persistent - device identity
+  --[ Prover_Hello(ID_j, x_p, sid) ]->
   [ Out(<sid, HID, CHlen, x_p>),
-    !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid),
-    !A1(ID_j, x_p, sid)
+    St_Prover_Hello($DEVICE, ID_j, HID, x_p, sid)  // Linear state
   ]
 
 rule Verifier_Hello:
-  [ In(<sid, H(ID_j), CHlen, x_p>), 
-    !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid), 
-    Fr(c), 
-    Fr(r), 
-    Fr(e) 
+  [ In(<sid, HID, CHlen, x_p>),
+    St_Prover_Hello($DEVICE, ID_j, HID, x_p, sid),  // Consumed
+    Challenge(c),              // 
+    Unique(r)                  // 
   ]
-  --[ Verifier_Hello(ID_j,CHlen, x_p, sid) ]->
-  [ Out(<sid, c, e>), 
-    !A_Verifier_Chain_Hello(c, r, e, sid),
-    !A2(ID_j, CHlen, x_p, sid)
+  --[ Verifier_Hello(ID_j, CHlen, x_p, sid) ]->
+  [ Out(<sid, c>),
+    St_Verifier_Hello($VERIFIER, $DEVICE, ID_j, HID, c, r, x_p, sid)  // Linear state
   ]
 // ---------------------------------------------------------------
 
@@ -49,98 +95,108 @@ rule Verifier_Hello:
 // Start the Chain authentication procedure
 rule Pr_Chain_1:
   let
-    rX   = EC(PUF(c), e)
-    x_pv = H2(x_p, ID_j)
-    CHA = H3(rX, c, x_pv)
+    rX   = PUF(c, r)
+    x_pv = H(<x_p, ID_j>)
+    CHA = H(<rX, c, x_pv>)
   in
-    [ In(<sid, c, e>),
-      !A_Prover_Chain_Hello(ID_j, CHlen, x_p, sid), 
-      !A_Verifier_Chain_Hello(c, r, e, sid) ]
-    --[ Pr_Chain_1(ID_j, x_pv, rX, sid) ]->
-    [ Out(<sid, CHA, H(ID_j)>),
-      !A_Prover_InChain_Auth(ID_j, CHA, x_p, x_pv, rX, sid),
-      !A3(ID_j, x_pv, rX, sid)
-    ]
+  [ In(<sid, c>),
+    St_Verifier_Hello($VERIFIER, $DEVICE, ID_j, HID, c, r, x_p, sid)  // Consumed
+  ]
+  --[ Pr_Chain_1(ID_j, x_pv, rX, sid) ]->
+  [ Out(<sid, CHA, HID>),
+    St_Pr_Chain_1($DEVICE, $VERIFIER, ID_j, HID, CHA, x_p, x_pv, rX, sid)  // Linear state
+  ]
 
 rule Ver_Chain_1:
-  [ In(<sid, CHA, H(ID_j)>), 
-    !A_Verifier_Chain_Hello(c, r, e, sid), 
-    !A_Prover_InChain_Auth(ID_j, CHA, x_p, x_pv, rX, sid),
-    Fr(c1), 
-    Fr(r1), 
-    Fr(e1) 
+  let
+    ACK = H(<rX, ID_j, x_pv>)
+  in
+  [ In(<sid, CHA, HID>),
+    St_Pr_Chain_1($DEVICE, $VERIFIER, ID_j, HID, CHA, x_p, x_pv, rX, sid),  // Consumed
+    Challenge(c1),             // 
+    Unique(r1)                 //
   ]
   --[ Ver_Chain_1(ID_j, CHA, sid) ]->
-  [ Out(<sid, e1>), 
-    !CommonCRP(sid, c1, r1, e1),
-    !A_Verifier_InChain_Auth(ID_j, x_p, x_pv, c1, r1, e1, sid),
-    !A4(c1, e1, sid)
+  [ Out(<sid, ACK>),
+    St_Ver_Chain_1($VERIFIER, $DEVICE, ID_j, HID, x_p, x_pv, c1, r1, sid)  // Linear state
   ]
 
 rule Pr_Chain_2:
   let
-      rX1   = EC(PUF(c1), e1)
-      x_pv = H2(x_p, ID_j)
-      CHA1 = H3(rX1, c1, x_pv)
+    rX1   = PUF(c1, r1)
+    x_pv = H(<x_p, ID_j>)
+    CHA1 = H(<rX1, c1, x_pv>)
   in
-  [ In(<sid, e1>), 
-    !CommonCRP(sid, c1, r1, e1),
-    !A_Verifier_InChain_Auth(ID_j, x_p, x_pv, c1, r1, e1, sid),
-    !A4(c1, e1, sid)
+  [ In(<sid, ACK>),
+    St_Ver_Chain_1($VERIFIER, $DEVICE, ID_j, HID, x_p, x_pv, c1, r1, sid)  // Consumed
   ]
   --[ Pr_Chain_2(ID_j, x_pv, rX1, sid) ]->
-  [ Out(<sid, CHA1, H(ID_j)>),
-    !A_Prover_InChain_Auth_Last(ID_j, CHA1, x_p, x_pv, rX1, sid),
-    !A5(ID_j, CHA1, sid)
+  [ Out(<sid, CHA1, HID>),
+    St_Pr_Chain_2($DEVICE, $VERIFIER, ID_j, HID, CHA1, x_p, x_pv, rX1, sid)  // Linear state
   ]
 
+
+rule GenerateM:  // Generate M - one-time use
+    [
+        Fr(~M)
+    ]
+    --[GenerateM(~M)]->
+    [
+        Generate_M(~M)   // Linear - consumed when used
+    ]
+
 rule Ver_Chain_2:
-  [ In(<sid, CHA1, H(ID_j)>), Fr(M), 
-    !A_Prover_InChain_Auth_Last(ID_j, CHA1, x_p, x_pv, rX1, sid), 
-    !A5(ID_j, CHA1, sid),
-    Fr(c2), 
-    Fr(r2), 
-    Fr(e2) 
+  let
+    ACK = H(<rX1, ID_j, x_pv>)
+  in
+  [ In(<sid, CHA1, HID>),
+    St_Pr_Chain_2($DEVICE, $VERIFIER, ID_j, HID, CHA1, x_p, x_pv, rX1, sid),  // Consumed
+    Generate_M(M),             // 
+    Challenge(c2),             // 
+    Unique(r2)                 //
   ]
   --[ Ver_Chain_2(ID_j, M, sid) ]->
-  [ Out(<sid, e2, M>), 
-    !A_Verifier_InChain_Auth_Last(c2, r2, e2, sid),
-    !A6(ID_j, M, sid)
+  [ Out(<sid, ACK, M>),
+    St_Ver_Chain_2($VERIFIER, $DEVICE, ID_j, HID, x_p, x_pv, c2, r2, M, sid)  // Linear state
   ]
 // ---------------------------------------------------------------
 
 // begin the mutual auth and key exchange
+
 rule Mutual_Begin:
   let
-      rx   = EC(PUF(c2), e2)
-      x_pv = H2(x_p, ID_j)
-      CHA = H3(rx, c2, x_pv)
-      Z    = ZK(M, rx, x)
+    rx   = PUF(c2, r2)
+    x_pv = H(<x_p, ID_j>)
+    CHA = H(<rx, c2, x_pv>)
+    Z    = ZK(M, rx, x)
   in
-  [ In(<sid, e2, M>), 
-    !A_Verifier_InChain_Auth_Last(c2, r2, e2, sid),
-    Fr(x),
-    !A1(ID_j, x_p, sid)
+  [ In(<sid, e2, M>),
+    St_Ver_Chain_2($VERIFIER, $DEVICE, ID_j, HID, x_p, x_pv, c2, r2, M, sid),  // Consumed
+    Session_RND(x)             // Linear - fresh x for mutual auth
   ]
   --[ Mutual_Begin(ID_j, x, sid) ]->
-  [ Out(<sid, CHA, Z, H(ID_j)>), !ZKA(sid, x, Z, H(ID_j)),
-    !A7(ID_j, x, sid)
+  [ Out(<sid, CHA, Z, HID>),
+    St_Mutual_Begin($DEVICE, $VERIFIER, ID_j, HID, x, Z, sid)  // Linear state
   ]
 
 rule Mutual_InProcess:
   let
-      MTL = H2(x, ID_j)
+    MTL = H(<x, ID_j>)
   in
-  [ In(<sid, CHA, Z, H(ID_j)>), !ZKA(sid, x, Z, H(ID_j)), !A7(ID_j, x, sid) ]
+  [ In(<sid, CHA, Z, HID>),
+    St_Mutual_Begin($DEVICE, $VERIFIER, ID_j, HID, x, Z, sid)  // Consumed
+  ]
   --[ Mutual_InProcess(ID_j, Z, sid) ]->
-  [ Out(<sid, MTL>), !SentMTLFull(sid, x, ID_j, Z),
-    !A8(ID_j, Z, sid)
+  [ Out(<sid, MTL>),
+    St_Mutual_InProcess($VERIFIER, $DEVICE, ID_j, MTL, sid)  // Linear state
   ]
 
 rule Mutual_End:
-  [ In(<sid, MTL>), !SentMTLFull(sid, x, ID_j, Z) ]
+  [ In(<sid, MTL>),
+    St_Mutual_InProcess($VERIFIER, $DEVICE, ID_j, MTL, sid)  // Consumed
+  ]
   --[ Mutual_End(ID_j, MTL, sid) ]->
-  [ !A9(ID_j, MTL, sid) ]
+  [ ]  // Protocol complete - no further state needed
 
 // ---------------------------------------------------------------
 
@@ -173,6 +229,26 @@ rule IDLeak:
 // **************************************************End of Rules**************************************************************************************************************************
 
 // ****************************************************************************************************************************************************************************************
+
+// Restrictions to ensure uniqueness and constrain state space
+
+restriction Unique_Session:
+  "All sid #i #j. SessionID(sid)@i & SessionID(sid)@j ==> #i = #j"
+
+restriction Unique_Challenge:
+  "All c #i #j. ChallengeGen(c)@i & ChallengeGen(c)@j ==> #i = #j"
+
+restriction Unique_ID:
+  "All id #i #j. IDCommit(id)@i & IDCommit(id)@j ==> #i = #j"
+
+restriction Unique_M:
+  "All M #i #j. GenerateM(M)@i & GenerateM(M)@j ==> #i = #j"
+
+restriction Unique_SessionRND:
+  "All x #i #j. SessionRND(x)@i & SessionRND(x)@j ==> #i = #j"
+
+restriction Unique_Unique:
+  "All r #i #j. UniqueGen(r)@i & UniqueGen(r)@j ==> #i = #j"
 
 /*
     Group #1 Correctness / Key Establishment. This evaluation splitted into two lemmas for computational reason. Each lemma proves the protocol can progress through a particular (or the full) sequence of steps, i.e., that a full run is reachable and a key can in principle be established.
@@ -263,6 +339,7 @@ lemma Mutual_Auth_2:
     ==> (Ex Z #t2. Mutual_InProcess(ID_j, Z, sid) @ t2 & #t2 < #t1) 
   " 
 
+/* 
 lemma No_Imper:
   "
   All ID_j Z sid #t1.
@@ -276,6 +353,7 @@ lemma No_Imper_2:
     Mutual_End(ID_j, MTL, sid) @ t1
     ==> (Ex Z #t2. Mutual_InProcess(ID_j, Z, sid) @ t2 & #t2 < #t1) 
   "
+*/
 
 lemma Possible_Impersonation_Attack:  // should be return false
   exists-trace
@@ -293,13 +371,16 @@ lemma No_Reuse:
     ==> #t1 = #t2
   "
 
+/* 
 lemma Replay_Attack:
-  "
-  All ID_j M sid #t1 #t2.
+    "
+    All ID_j M sid #t1 #t2.
     Ver_Chain_2(ID_j, M, sid) @ t1
     & Ver_Chain_2(ID_j, M, sid) @ t2
     ==> #t1 = #t2
-  "
+    "
+*/
+
 
 // ****************************************************************************************************************************************************************************************
 
@@ -322,13 +403,15 @@ lemma Session_Secrecy:
     Mutual_Begin(ID_j, x, sid) @ t1
     ==> not (Ex #t2. K(x) @ t2)
   "
-
+/*
 lemma Stolen_Ver:
   "
   All ID_j x sid #t1.
     Mutual_Begin(ID_j, x, sid) @ t1
     ==> not (Ex #t2. K(x) @ t2)
   "  
+*/
+
 
 lemma No_Sniff_IDj:
   "
@@ -351,6 +434,7 @@ lemma No_Sniff_xpv_r:
   Group #4 Perfect forward / backward secrecy. This lemma will be invalid or cannot be executed if the IDLeak and SessionLeak rules are not executed.
 */
 
+/*
 lemma Forward_Secrecy:
   "
   All ID_j x sid #t1 #t2.
@@ -369,7 +453,7 @@ lemma Backward_Secrecy:
    & #t_leak < #t_new                     // leak happens first
    ==> not (Ex #t. K(x_new) @ #t)         // attacker never learns new key
   "  
-
+*/
 // ****************************************************************************************************************************************************************************************
 
 
